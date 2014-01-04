@@ -27,7 +27,7 @@ tor_proc = fork do
     exec "tor -f #{file}"
 end
 Process.detach tor_proc
-
+sleep 1
 class RedditKit::Client
     def connection_with_url(url)
         Faraday.new(url, {:builder => middleware, :proxy => "socks://127.0.0.1:#{$port}"})
@@ -129,37 +129,130 @@ def mass_upvote id
         change_ip
     end
 end
+class String
+    def minclude? arr
+        d = self.downcase
+        arr.each do |word|
+            if d.include? word
+                return true
+            end
+        end
+        return false
+    end
+end
+
+def response str
+    bot = CleverBot.new
+    resp = ""
+    while resp.length == 0 || resp.minclude?(["bot", "ai ", "a.i."])
+        resp = bot.think str
+    end
+    return resp
+end
+def internal_karma
+    c = 0
+    l = 0
+    maxc = 0
+    maxl = 0
+    max_user = ""
+    $redis.keys("riag:account:*").each do |acc|
+        info = $redis.hgetall(acc)
+        uc = info["comment_karma"].to_i
+        ul = info["link_karma"].to_i
+        c += uc
+        l += ul
+        if maxc+maxl < ul + uc
+            maxc = uc
+            maxl = ul
+            max_user = info["user"]
+        end
+    end
+    puts "[InternalKarma] Link: #{l}, Comment: #{c}, Total: #{l+c}"
+    puts " :: Highest: #{max_user}, #{maxl}/#{maxc}/#{maxl+maxc}"
+end
+def enumerate_karma
+    link_karma = 0
+    comment_karma = 0
+    $redis.keys("riag:account:*").shuffle.each do |acc|
+        user = acc.split(":").last
+        c = conn "http://www.reddit.com/user/#{user}/"
+        resp = c.get.body
+        noko = Nokogiri.parse resp
+        karmas = noko.css(".karma")
+        if karmas.length > 0
+            lkarma = karmas.first.text.gsub(",","").to_i
+            ckarma = noko.css(".comment-karma").first.text.gsub(",","").to_i
+            link_karma += lkarma
+            comment_karma += ckarma
+            puts "[Karma] #{user}, L: #{lkarma}/#{link_karma}, C: #{ckarma}/#{comment_karma}, T: #{lkarma + ckarma}/#{comment_karma+link_karma}"
+            $redis.hmset "riag:account:#{user}", "link_karma", lkarma, "comment_karma", ckarma
+        else
+            puts "[ShadowBanned] #{user}".red
+            $redis.hmset "riag:account:#{user}", "shadow_banned", true
+        end
+        change_ip
+        sleep 6
+    end
+end
 def rand_user
     acc = $redis.keys("riag:account:*")
     user = acc[rand(acc.length)].split(":").last
     return login user
 rescue RedditKit::PermissionDenied
-    throw "Failed to login to #{user}"
+    error "Failed to login to #{user}"
+    sleep 6
+    return
 end
-def top_posts
+def top_posts n
     c = rand_user
     links = []
-    puts "[Top Posts] Grabbing lots..."
-    puts " :: Getting Page 1"
-    links += c.front_page({category: 'top', limit: 100, time: 'all'}).to_a
-    10.times do |i|
-        puts " :: Getting Page #{i+2}, Link Count: #{links.length}"
-        links += c.front_page({category: 'top', limit: 100, time: 'all', after: "t3_#{links.last.id}"}).to_a
+    puts "[Top Posts] Fetching top #{n*100}."
+    n.times do |i|
+        puts " :: Getting Page #{i+1}, Link Count: #{links.length}"
+        after = ""
+        if links.length > 0
+            after = "t3_#{links.last.id}"
+        end
+        got = c.front_page({category: 'top', limit: 100, time: 'all', after: after}).to_a
+        got.select do |link|
+            link.domain.include? "imgur.com"
+        end .each do |link|
+            $redis.sadd "riag:top-images", "t3_#{link.id}"
+        end
+        links += got
     end
     binding.pry
 end
+def post_a_bunch n
+    top = $redis.smembers "riag:top-images"
+    n.times do |i|
+        submit top[rand(top.length)]
+        change_ip
+    end
+end
+def error msg
+    puts " :: Error! #{msg}".red
+end
 def submit id
     client = rand_user
+    if !client
+        return
+    end
     details = client.link(id)
     name = client.username
     title = details.title
     subreddit = client.subreddit details.subreddit
-    puts "[Resubmitting] #{title} as #{name}"
+    puts "[Resubmitting] #{title} as #{name} to r/#{details.subreddit}"
+    if details.subreddit == "Music"
+        error "r/Music doesn't accept pictures!"
+        return
+    end
     if details.kind == "t3"
         if details.domain.include? "imgur"
-            link = upload_url details.url
+            # link = upload_url details.url
+            link = change_url details.url
             puts " :: Image uploaded: #{link}"
-            captcha = true #client.needs_captcha?
+            captcha = client.needs_captcha?
             $redis.hmset "riag:account:#{name}", "needs_captcha", captcha
             if captcha
                 captcha_id = client.new_captcha_identifier
@@ -175,20 +268,39 @@ def submit id
                 resp = $captcha.decode file
                 begin
                     link = client.submit title, subreddit, {url: link, captcha_identifier: captcha_id, captcha_value: resp['text'], save: true}
-                    binding.pry
                 rescue RedditKit::InvalidCaptcha
-                    puts " :: Error! Invalid Captcha. URL: #{url}, Code: #{resp['text']}"
+                    error "Invalid Captcha. URL: #{url}, Code: #{resp['text']}"
                     $captcha.report resp["captcha"]
+                rescue RedditKit::RateLimited
+                    error "RateLimited!"
+                    return
                 end
             else
                 client.submit title, subreddit, {url: link}
             end
             $redis.incr "riag:links_submitted"
         else
-            puts " :: Error! Not Imgur!"
+            error "Not Imgur!"
         end
     else
-        puts " :: Error! Not link!"
+        error "Not link!"
+    end
+end
+def change_url url
+    if url.include? "://imgur.com/a/"
+        if url[url.length-1]!="/"
+            url += "/"
+        end
+        return url +"#{rand(100)}/"
+    elsif url.include? "://imgur.com/gallery/"
+        bits = url.split("/")
+        id = bits[bits.index("gallery")+1]
+        return "http://i.imgur.com/#{id}.jpg.png"
+    else
+        uri = URI.parse url
+        uri.host = "i.imgur.com"
+            uri.path += ".png"
+        return uri.to_s# + rand(100).to_s
     end
 end
 def upload_url url
@@ -197,7 +309,6 @@ def upload_url url
     end
     conn = Faraday.new(:url => 'https://api.imgur.com/3/image') do |faraday|
         faraday.request  :url_encoded             # form-encode POST params
-        faraday.response :logger                  # log requests to STDOUT
         faraday.adapter  Faraday.default_adapter  # make requests with Net::HTTP
     end
     resp = conn.post do |req|
@@ -225,15 +336,15 @@ def make_account
             puts " :: Registered!"
             $redis.hmset "riag:account:"+user, {user: user, pass:pass, useragent: $client.user_agent}.flatten
         else
-            puts " :: Error! Status: #{reddit_resp[:status]}"
+            error "Status: #{reddit_resp[:status]}"
             binding.pry
         end
         change_ip
     rescue RedditKit::RateLimited
-        puts " :: Error! Rate Limited"
+        error "Rate Limited"
         change_ip
     rescue RedditKit::InvalidCaptcha
-        puts " :: Error! Invalid Captcha. URL: #{url}, Code: #{answer}"
+        error "Invalid Captcha. URL: #{url}, Code: #{answer}"
         $captcha.report resp["captcha"]
     end
 end
@@ -246,6 +357,9 @@ def login user
         client.sign_in details["user"], details["pass"]
         client
     end
+end
+if ARGV.length > 0
+    eval ARGV.join " "
 end
 binding.pry
 Process.kill "INT", tor_proc
