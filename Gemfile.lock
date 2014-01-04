@@ -1,27 +1,39 @@
+GIT
+  remote: https://github.com/samsymons/RedditKit.rb.git
+  revision: 9339e3386f0dcdf79fe37401198ec85740033519
+  specs:
+    redditkit (1.0.0)
+      faraday (>= 0.8)
+      htmlentities (>= 4.3)
+      multi_json (>= 1.8)
+
 GEM
   remote: https://rubygems.org/
   specs:
-    coderay (1.0.9)
+    cleverbot-api (0.0.4)
+    coderay (1.1.0)
     deathbycaptcha (4.1.4)
       json (>= 1.4.6)
       rest-client (~> 1.6.1)
     faraday (0.8.8)
       multipart-post (~> 1.2.0)
+    faraday_middleware (0.9.0)
+      faraday (>= 0.7.4, < 0.9)
     hiredis (0.4.5)
+    htmlentities (4.3.1)
     json (1.8.1)
     method_source (0.8.2)
     mime-types (2.0)
+    multi_json (1.8.2)
     multipart-post (1.2.0)
-    pry (0.9.12.2)
-      coderay (~> 1.0.5)
+    pry (0.9.12.4)
+      coderay (~> 1.0)
       method_source (~> 0.8)
       slop (~> 3.4)
-    redditkit (1.0.0)
-      faraday (~> 0.8)
-    redis (3.0.4)
+    redis (3.0.6)
     rest-client (1.6.7)
       mime-types (>= 1.16)
-    slop (3.4.6)
+    slop (3.4.7)
     socksify (1.5.0)
     tor (0.1.2)
 
@@ -29,10 +41,12 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
+  cleverbot-api
   deathbycaptcha
+  faraday_middleware
   hiredis
   pry
-  redditkit
+  redditkit!
   redis
   socksify
   tor

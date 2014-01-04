@@ -19,9 +19,25 @@ class Faraday::Adapter::NetHttp
         end.new(env[:url].host, env[:url].port)
     end
 end
+$port = 13000+(rand*100).floor * 10
+dir = Dir.mktmpdir
+file = "#{dir}/torrc"
+File.write(file, "SOCKSPort #{$port}\nControlPort #{$port+1}\nDataDirectory #{dir}")
+tor_proc = fork do
+    exec "tor -f #{file}"
+end
+Process.detach tor_proc
+
 class RedditKit::Client
     def connection_with_url(url)
-        Faraday.new(url, {:builder => middleware, :proxy => "socks://127.0.0.1:9050"})
+        Faraday.new(url, {:builder => middleware, :proxy => "socks://127.0.0.1:#{$port}"})
+    end
+end
+
+def conn url
+    Faraday.new( url, {:proxy => "socks://127.0.0.1:#{$port}"} ) do |conn|
+        conn.use FaradayMiddleware::FollowRedirects
+        conn.adapter :net_http
     end
 end
 
@@ -38,11 +54,9 @@ $agents = ["Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like 
     "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/31.0.1650.63 Safari/537.36"
 ]
 $words = File.read("/usr/share/dict/cracklib-small").split("\n")
-$torrc = Tor::Config.load("/etc/tor/torrc")
-$tor = Tor::Controller.connect(:port => 9051)
+$tor = Tor::Controller.connect(:port => ($port +1))
 $tor.authenticate
-port = ($torrc['SocksPort']||9050).to_i
-puts "Tor SOCKS port: #{port}"
+puts "Tor SOCKS port: #{$port}"
 #TCPSocket.socks_server="localhost"
 #TCPSocket.socks_port = port
 
@@ -51,7 +65,12 @@ def get_captcha
     url = $client.captcha_url id
     puts "ID: #{id}, URL: #{url}"
 end
-
+def import_ids
+    ids = JSON.parse(File.read("ids.json"))
+    ids.each do |v|
+        $redis.zadd("riag:rewind:ids", v["time"],v["id"])
+    end
+end
 def name words, style
     parts = []
     words.times do
@@ -77,7 +96,15 @@ def rand_name
     return name((2*rand).floor+2, (rand*2).floor)
 end
 def rand_pass
-    return (0...(20*rand).floor+5).map { ('a'..'z').to_a[rand(26)] }.join
+    letters = (0..9).to_a + ('A'..'Z').to_a+('a'..'z').to_a
+    return (0...rand(20)+5).map { letters[rand(letters.length)] }.join
+end
+def rand_code len
+    letters = (0..9).to_a + ('A'..'Z').to_a+('a'..'z').to_a
+    return (0...len).map { letters[rand(letters.length)] }.join
+end
+def write_accounts
+    File.write("tmp/accounts.txt",$redis.keys("riag:account:*").map{|a| a.split(":").last}.join("\n"))
 end
 def mass_upvote id
     link = nil
@@ -86,18 +113,98 @@ def mass_upvote id
         user = acc.split(":").last
         begin
             client = login user
-            link ||= client.link id
+            link ||= id[0..2]=="t1_" ? client.comment(id) : client.link(id)
             begin
                 client.upvote link
                 puts " :: #{user} upvoted."
             rescue RedditKit::PermissionDenied
                 puts " :: #{user} already upvoted."
+            rescue RedditKit::RateLimited
+                puts " :: #{user} rate limited!"
+                change_ip
             end
         rescue RedditKit::PermissionDenied
             puts " :: #{user} failed to login."
         end
         change_ip
     end
+end
+def rand_user
+    acc = $redis.keys("riag:account:*")
+    user = acc[rand(acc.length)].split(":").last
+    return login user
+rescue RedditKit::PermissionDenied
+    throw "Failed to login to #{user}"
+end
+def top_posts
+    c = rand_user
+    links = []
+    puts "[Top Posts] Grabbing lots..."
+    puts " :: Getting Page 1"
+    links += c.front_page({category: 'top', limit: 100, time: 'all'}).to_a
+    10.times do |i|
+        puts " :: Getting Page #{i+2}, Link Count: #{links.length}"
+        links += c.front_page({category: 'top', limit: 100, time: 'all', after: "t3_#{links.last.id}"}).to_a
+    end
+    binding.pry
+end
+def submit id
+    client = rand_user
+    details = client.link(id)
+    name = client.username
+    title = details.title
+    subreddit = client.subreddit details.subreddit
+    puts "[Resubmitting] #{title} as #{name}"
+    if details.kind == "t3"
+        if details.domain.include? "imgur"
+            link = upload_url details.url
+            puts " :: Image uploaded: #{link}"
+            captcha = true #client.needs_captcha?
+            $redis.hmset "riag:account:#{name}", "needs_captcha", captcha
+            if captcha
+                captcha_id = client.new_captcha_identifier
+                url = client.captcha_url captcha_id
+                puts " :: Decoding captcha... (#{url})"
+                co = conn url
+                co.headers['User-Agent'] = $redis.hmget("riag:account:#{name}", "useragent")[0]
+                img_resp = co.get
+                file = Tempfile.new "captcha.png"
+                file.write img_resp.body
+                file.close
+                file.open
+                resp = $captcha.decode file
+                begin
+                    link = client.submit title, subreddit, {url: link, captcha_identifier: captcha_id, captcha_value: resp['text'], save: true}
+                    binding.pry
+                rescue RedditKit::InvalidCaptcha
+                    puts " :: Error! Invalid Captcha. URL: #{url}, Code: #{resp['text']}"
+                    $captcha.report resp["captcha"]
+                end
+            else
+                client.submit title, subreddit, {url: link}
+            end
+            $redis.incr "riag:links_submitted"
+        else
+            puts " :: Error! Not Imgur!"
+        end
+    else
+        puts " :: Error! Not link!"
+    end
+end
+def upload_url url
+    if url.include? "://imgur.com/a/"
+        return "#{url}/#{$words[rand($words.length)]}"
+    end
+    conn = Faraday.new(:url => 'https://api.imgur.com/3/image') do |faraday|
+        faraday.request  :url_encoded             # form-encode POST params
+        faraday.response :logger                  # log requests to STDOUT
+        faraday.adapter  Faraday.default_adapter  # make requests with Net::HTTP
+    end
+    resp = conn.post do |req|
+        req.headers["Authorization"] = "Client-ID "+$redis.get("riag:imgur-id")
+        req.body = "image=#{url}"
+    end
+    return JSON.parse(resp.body)["data"]["link"]
 end
 def change_ip
     $tor.send(:send_line, "SIGNAL NEWNYM")
@@ -141,3 +248,4 @@ def login user
     end
 end
 binding.pry
+Process.kill "INT", tor_proc
