@@ -149,32 +149,43 @@ def response str
     end
     return resp
 end
+def user_details
+    details = []
+    $redis.keys("riag:account:*").each do |acc|
+        details.push $redis.hgetall(acc)
+    end
+    details
+end
 def internal_karma
     c = 0
     l = 0
-    maxc = 0
-    maxl = 0
-    max_user = ""
-    $redis.keys("riag:account:*").each do |acc|
-        info = $redis.hgetall(acc)
+    details = user_details.sort { |x,y| y["link_karma"].to_i <=> x["link_karma"].to_i }
+    details.each do |info|
         uc = info["comment_karma"].to_i
         ul = info["link_karma"].to_i
         c += uc
         l += ul
-        if maxc+maxl < ul + uc
-            maxc = uc
-            maxl = ul
-            max_user = info["user"]
-        end
     end
     puts "[InternalKarma] Link: #{l}, Comment: #{c}, Total: #{l+c}"
-    puts " :: Highest: #{max_user}, #{maxl}/#{maxc}/#{maxl+maxc}"
+    i = 0
+    10.times do
+        puts " :: #{i+1}: #{details[i]["user"]}, #{details[i]["link_karma"]}/#{details[i]["comment_karma"]}"
+        i += 1
+    end
+    #puts " :: Highest: #{max_user}, #{maxl}/#{maxc}/#{maxl+maxc}"
 end
 def enumerate_karma
     link_karma = 0
     comment_karma = 0
-    $redis.keys("riag:account:*").shuffle.each do |acc|
-        user = acc.split(":").last
+    user_details.sort do |x,y|
+        xt = x["last_checked"]
+        xt ||= DateTime.new.to_s
+        yt = y["last_checked"]
+        yt ||= DateTime.new.to_s
+        DateTime.strptime(xt) <=> DateTime.strptime(yt)
+    end.each do |acc|
+        user = acc["user"]
+        $redis.hmset "riag:account:#{user}", "last_checked", DateTime.now
         c = conn "http://www.reddit.com/user/#{user}/"
         resp = c.get.body
         noko = Nokogiri.parse resp
