@@ -1,0 +1,19 @@
+{
+    "manifest_version": 2,
+    "name": "RIAG Monitor",
+    "description": "RIAG integration into normal reddit.",
+    "version": "0.1",
+    "icons": { "128": "d4l3k.jpeg" },
+
+    "content_scripts": [{
+        "matches": ["*://*.reddit.com/*"],
+        "css": [],
+        "js": ["jquery-1.10.2.min.js","work.js"]
+    }],
+    "permissions": [
+        "*://*.reddit.com/"
+    ],
+    "background": {
+        "scripts": ["background.js"]
+    }
+}

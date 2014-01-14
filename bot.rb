@@ -19,7 +19,7 @@ class Faraday::Adapter::NetHttp
         end.new(env[:url].host, env[:url].port)
     end
 end
-$port = 13000+(rand*100).floor * 10
+$port = 13000+rand(10000) * 2
 dir = Dir.mktmpdir
 file = "#{dir}/torrc"
 File.write(file, "SOCKSPort #{$port}\nControlPort #{$port+1}\nDataDirectory #{dir}")
@@ -69,6 +69,14 @@ def import_ids
     ids = JSON.parse(File.read("ids.json"))
     ids.each do |v|
         $redis.zadd("riag:rewind:ids", v["time"],v["id"])
+    end
+end
+def farm
+    loop do
+        begin
+            post_a_bunch 200
+        rescue
+        end
     end
 end
 def name words, style
